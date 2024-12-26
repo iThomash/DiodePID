@@ -1,0 +1,7 @@
+../Core/Src/main.c:70:6:SendDebugMessage	16	static
+../Core/Src/main.c:74:6:SendDebugInt	40	static
+../Core/Src/main.c:80:6:SendDebugFloat	48	static
+../Core/Src/main.c:86:6:HAL_UART_RxCpltCallback	24	static
+../Core/Src/main.c:100:5:main	32	static
+../Core/Src/main.c:196:6:SystemClock_Config	120	static
+../Core/Src/main.c:254:6:Error_Handler	4	static,ignoring_inline_asm
