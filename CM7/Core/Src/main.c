@@ -29,7 +29,12 @@
 /* USER CODE BEGIN Includes */
 #include <stdbool.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include "lcd_i2c.h"
+#include "string.h"
+#include "eeprom.h"
+#include "jsmn.h"
+
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -54,9 +59,20 @@
 /* Private variables ---------------------------------------------------------*/
 
 /* USER CODE BEGIN PV */
-uint8_t rx_data[3];
 struct lcd_disp disp;
+uint16_t max_lux_value = 10000;
+uint16_t min_lux_value = 0;
+uint16_t set_value = 100;  // LUX
+uint16_t pwm_width = 100;  // PERCENT
+//Priority explaination
+// 0 - Prioritize to change the pwm width to meet the "set_value" value
+// 1 - Set the PWM width value, to read the lux value, set by defualt
+volatile uint8_t priority = 1;
+volatile bool userButtonPressed = false;
 
+uint8_t rx_buffer[50];
+uint8_t rx_data;
+uint8_t rx_index = 0;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -83,14 +99,109 @@ void SendDebugFloat(float value) {
     SendDebugMessage(buffer);
 }
 
-void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
-{
-	SendDebugMessage(rx_data);
-	int rx_data_int = 100*(rx_data[0]-'0') + 10*(rx_data[1]-'0') + (rx_data[2]-'0');
-	__HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_1, rx_data_int);
-
-	HAL_UART_Receive_IT(&huart3, &rx_data, 3);
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart) {
+    if (rx_data != '}') {
+        rx_buffer[rx_index++] = rx_data;
+    } else {
+        rx_buffer[rx_index++] = rx_data;
+        rx_buffer[rx_index] = '\0';
+        rx_index = 0;
+        ParseJson((char*)rx_buffer);
+    }
+    HAL_UART_Receive_IT(&huart3, &rx_data, 1);
 }
+
+void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin) {
+	if (GPIO_Pin == USER_BUTTON_Pin) {
+		userButtonPressed = true;
+	}
+}
+
+float measureLux() {
+	HAL_ADC_Start(&hadc1);
+	HAL_ADC_PollForConversion(&hadc1,20);
+	uint16_t v = HAL_ADC_GetValue(&hadc1);
+
+	float voltage = 3.3 * v / 65535;
+	float resistance = (( voltage)/(3.3 - voltage) * 4700);
+	float lux = (10 * pow(8000, 1/0.6)) / pow(resistance, 1/0.6);
+	return lux;
+}
+
+int jsoneq(const char *json, jsmntok_t *token, const char *s) {
+    if (token->type != JSMN_STRING) {
+        return 1;
+    }
+    int token_length = token->end - token->start;
+    return (strlen(s) == token_length) && (strncmp(json + token->start, s, token_length) == 0);
+}
+
+void ParseJson(const char* json) {
+    jsmn_parser parser;
+    jsmntok_t tokens[20];
+    jsmn_init(&parser);
+
+    int r = jsmn_parse(&parser, json, strlen(json), tokens, sizeof(tokens) / sizeof(tokens[0]));
+    if (r < 0) { return; }
+
+    for (int i = 1; i < r; i++) {
+        if (tokens[i].type == JSMN_STRING) {
+            char key[10];
+            snprintf(key, sizeof(key), "%.*s", tokens[i].end - tokens[i].start, json + tokens[i].start);
+            if (i + 1 < r) {
+            	if (tokens[i + 1].type == JSMN_PRIMITIVE) {
+            		char value[10];
+					snprintf(value, sizeof(value), "%.*s", tokens[i + 1].end - tokens[i + 1].start, json + tokens[i + 1].start);
+					char *endptr;
+					int num_value = (int) strtol(value, &endptr, 10);
+					if (strcmp(key, "LED") == 0) {
+						if (*endptr == '\0') {
+							set_value = num_value;
+						}
+					} else if (strcmp(key, "PWM") == 0) {
+						if (*endptr == '\0' ) {
+							pwm_width = num_value;
+						}
+					} else if (strcmp(key, "PRIORITY") == 0) {
+						if (*endptr == '\0' ) {
+							priority = num_value;
+						}
+					}
+				}
+            }
+            i++;
+        }
+    }
+
+	SendDebugMessage("{\"success\": 1, \"message\": \"Success!\"}");
+}
+
+int prev_value = 0;
+float u_i = 0;
+float kp = 1;
+float ki = 0.3;
+float kd = 2;
+int u_pid;
+int saturacja(uint16_t value) {
+	if (value > 999) {
+		value = 999;
+	}
+	if (value < 1) {
+		value = 1;
+	}
+	return value;
+}
+
+uint16_t PID_calc(uint16_t current_lux, uint16_t set_lux_value) {
+    int e = set_lux_value - current_lux;
+    float u_k = kp * (float)e;
+    u_i = u_i + (int)(ki * (float)e);
+    float u_d = kd * ((float)(current_lux - prev_value) / 2.0);
+    u_pid = (int)(u_k + u_i + u_d);
+    prev_value = current_lux;
+    return saturacja(u_pid);
+}
+
 /* USER CODE END 0 */
 
 /**
@@ -165,23 +276,72 @@ Error_Handler();
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
-	  TIM2->CCR1 = 100;
-	  HAL_TIM_PWM_Start_IT(&htim2, TIM_CHANNEL_1);
-	  HAL_UART_Receive_IT(&huart3, &rx_data, 3);
+	TIM2->CCR1 = 100;
+	HAL_TIM_PWM_Start_IT(&htim2, TIM_CHANNEL_1);
+	HAL_UART_Receive_IT(&huart3, &rx_data, 3);
+	char buffer[100];
+	ParseJson("{\"LED\": 100, \"PWM\": 100, \"PRIORITY\": 1}\r\n");
   while (1)
   {
-	HAL_ADC_Start(&hadc1);
-	HAL_ADC_PollForConversion(&hadc1,20);
-	uint16_t v = HAL_ADC_GetValue(&hadc1);
+	// Measure lux in the area
+	float lux = measureLux();
 
-	float voltage = 3.3 * v / 65535;
-	float resistance = (( voltage)/(3.3 - voltage) * 4700);
-	float lux = (10 * pow(8000, 1/0.6)) / pow(resistance, 1/0.6);
-
-	sprintf((char *)disp.f_line, "%.2f", lux);
-	sprintf((char *)disp.s_line, "uwu");
+	//LCD handler
+	sprintf((char *)disp.f_line, "Current: %.2f", lux);
+	sprintf((char *)disp.s_line, "Set value: %d", set_value);
 	lcd_display(&disp);
+
+	// 0 - Prioritize to change the pwm width to meet the "set_value" value
+	// 1 - Set the PWM width value, to read the lux value, set by defualt
+	if (priority == 1) {
+		__HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_1, pwm_width);
+	} else {
+		uint16_t counter = PID_calc(lux, set_value);
+		__HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_1, counter);
+	}
+
+	char buffer[100];
+	snprintf(buffer, sizeof(buffer), "{\"operation\": \"data\", \"data\": %.2f}\r\n", lux);
+	SendDebugMessage(buffer);
+
 	HAL_Delay(500);
+
+	//User Button click handler
+	if (userButtonPressed) {
+		userButtonPressed = false;
+		uint32_t backup_value = __HAL_TIM_GET_COMPARE(&htim2, TIM_CHANNEL_1);
+		__HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_1, 0);
+		HAL_Delay(500);
+		uint16_t low_lux = measureLux();
+		__HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_1, 999);
+		HAL_Delay(500);
+		uint16_t high_lux = measureLux();
+
+		//YES I COULD HAVE CHANGED THE VALUES OF HIGH AND LOW LUX HERE
+
+		uint16_t measures[2] = {low_lux, high_lux};
+		if (EEPROM_WriteIntArray(0x0000, measures, sizeof(measures)) == HAL_OK) {
+			SendDebugMessage("{\"operation\": \"write\", \"message\": \"success\"}\r\n");
+		} else {
+			SendDebugMessage("{\"message\": \"failure\"}\r\n");
+		}
+		HAL_Delay(10);
+		uint16_t readMeasurements[2] = {0,0};
+		if (EEPROM_ReadIntArray(0x0000, &readMeasurements, sizeof(readMeasurements)) == HAL_OK) {
+			char buffer[100];
+			snprintf(buffer, sizeof(buffer), "{\"operation\": \"read\", \"message\": \"success\", \"low_lux\": %d, \"high_lux\": %d}\r\n", low_lux, high_lux);
+			// HERE WE READ THE MIN AND MAX VALUE FOR LED C:
+			min_lux_value = readMeasurements[0];
+			max_lux_value = readMeasurements[1];
+			SendDebugMessage(buffer);
+		} else {
+			SendDebugMessage("{\"operation\": \"read\", \"message\": \"failure\"}\r\n");
+		}
+
+		__HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_1, backup_value);
+		HAL_Delay(300);
+
+	}
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
