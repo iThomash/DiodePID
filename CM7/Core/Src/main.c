@@ -59,20 +59,32 @@
 /* Private variables ---------------------------------------------------------*/
 
 /* USER CODE BEGIN PV */
+
+//LCD struct for handling display data
 struct lcd_disp disp;
+
+// Variables that are changed during the process
+// max_lux_value and min_lux_value are responsible for limiting the lux value reachable by the circuit
+// set_value and pwm_width are describing the set value for pwm width or desired lux value.
+// Dominating value is defined by "priority" variable.
 uint16_t max_lux_value = 10000;
 uint16_t min_lux_value = 0;
 uint16_t set_value = 100;  // LUX
 uint16_t pwm_width = 100;  // PERCENT
+
 //Priority explaination
 // 0 - Prioritize to change the pwm width to meet the "set_value" value
 // 1 - Set the PWM width value, to read the lux value, set by defualt
 volatile uint8_t priority = 1;
+
+//Single click detection variable
 volatile bool userButtonPressed = false;
 
+// Buffer and variables needed for USART communication
 uint8_t rx_buffer[50];
 uint8_t rx_data;
 uint8_t rx_index = 0;
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -83,22 +95,51 @@ void SystemClock_Config(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+/**
+ * @brief Sends a debug message over UART. Can be used as a medium for communication
+ * with other device. Allows sending strings or even a JSON.
+ *
+ * @param message The message string to send.
+ */
 void SendDebugMessage(const char* message) {
     HAL_UART_Transmit(&huart3, (uint8_t*)message, strlen(message), HAL_MAX_DELAY);
 }
 
+/**
+ * @brief Sends an integer as a debug message.
+ *
+ * Converts an integer to a string and sends it using the SendDebugMessage function.
+ *
+ * @param value The integer value to send.
+ */
 void SendDebugInt(int value) {
     char buffer[20];
     snprintf(buffer, sizeof(buffer), "%d", value);
     SendDebugMessage(buffer);
 }
 
+/**
+ * @brief Sends a float as a debug message.
+ *
+ * Converts a float to a string with two decimal precision and sends it using the SendDebugMessage function.
+ *
+ * @param value The float value to send.
+ */
 void SendDebugFloat(float value) {
     char buffer[20];
     snprintf(buffer, sizeof(buffer), "%.2f", value);
     SendDebugMessage(buffer);
 }
 
+/**
+ * @brief UART receive complete callback.
+ *
+ * This function is called when a UART receive operation completes. It processes
+ * incoming data character by character and triggers JSON parsing when a complete
+ * JSON message is received.
+ *
+ * @param huart The UART handle.
+ */
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart) {
     if (rx_data != '}') {
         rx_buffer[rx_index++] = rx_data;
@@ -111,12 +152,28 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart) {
     HAL_UART_Receive_IT(&huart3, &rx_data, 1);
 }
 
+/**
+ * @brief GPIO external interrupt callback.
+ *
+ * This function is triggered when an external interrupt is generated on a specific GPIO pin.
+ * It detects user button presses and sets a flag.
+ *
+ * @param GPIO_Pin The pin number that triggered the interrupt.
+ */
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin) {
 	if (GPIO_Pin == USER_BUTTON_Pin) {
 		userButtonPressed = true;
 	}
 }
 
+/**
+ * @brief Measures the light intensity in lux.
+ *
+ * This function starts an ADC conversion, calculates the voltage from the ADC value,
+ * computes the resistance of the light sensor, and calculates the lux value using a formula.
+ *
+ * @return The calculated lux value as a float.
+ */
 float measureLux() {
 	HAL_ADC_Start(&hadc1);
 	HAL_ADC_PollForConversion(&hadc1,20);
@@ -128,6 +185,17 @@ float measureLux() {
 	return lux;
 }
 
+/**
+ * @brief Compares a JSON key to a given string.
+ *
+ * This utility function checks if a JSON key matches a specified string.
+ *
+ * @param json The JSON string.
+ * @param token The JSON token to compare.
+ * @param s The string to compare against.
+ *
+ * @return 0 if the JSON key matches the string, 1 otherwise.
+ */
 int jsoneq(const char *json, jsmntok_t *token, const char *s) {
     if (token->type != JSMN_STRING) {
         return 1;
@@ -136,6 +204,21 @@ int jsoneq(const char *json, jsmntok_t *token, const char *s) {
     return (strlen(s) == token_length) && (strncmp(json + token->start, s, token_length) == 0);
 }
 
+/**
+ * @brief Parses a JSON string and processes specific keys.
+ *
+ * This function parses a JSON string using the JSMN library, identifies specific keys,
+ * and updates corresponding variables based on their values.
+ *
+ * Recognized keys:
+ * - "LED": Sets the LED state (integer).
+ * - "PWM": Sets the PWM width (integer).
+ * - "PRIORITY": Sets the priority level (integer).
+ *
+ * Sends a success message as a JSON response after processing.
+ *
+ * @param json The JSON string to parse.
+ */
 void ParseJson(const char* json) {
     jsmn_parser parser;
     jsmntok_t tokens[20];
@@ -176,13 +259,26 @@ void ParseJson(const char* json) {
 	SendDebugMessage("{\"success\": 1, \"message\": \"Success!\"}");
 }
 
+// Variables required for PID controller
+// prev_value is used to store the previous error value
 int prev_value = 0;
+
+// Controller settings, selected on the basis of the experiments
+float kp = 1, ki = 0.3, kd = 0;
+
+// Variable for storing data related to the integrating part of PID
 float u_i = 0;
-float kp = 1;
-float ki = 0.3;
-float kd = 2;
-int u_pid;
-int saturacja(uint16_t value) {
+
+/**
+ * @brief Saturates a value within a specified range.
+ *
+ * Ensures the input value remains within the range of 1 to 999.
+ *
+ * @param value The input value to be saturated.
+ *
+ * @return The saturated value within the range [1, 999].
+ */
+int saturate(uint16_t value) {
 	if (value > 999) {
 		value = 999;
 	}
@@ -192,14 +288,29 @@ int saturacja(uint16_t value) {
 	return value;
 }
 
+/**
+ * @brief Performs PID control calculation for light intensity adjustment.
+ *
+ * Computes the PID control output(PWM width) based on the current and desired lux values.
+ * - Proportional term: Adjusts the output based on the current error.
+ * - Integral term: Accumulates the error over time.
+ * - Derivative term: Predicts the future trend of the error.
+ *
+ * The computed output is then saturated to ensure it remains within valid bounds.
+ *
+ * @param current_lux The current measured lux value.
+ * @param set_lux_value The desired lux value to achieve.
+ *
+ * @return The PID control output value, saturated within the range [1, 999].
+ */
 uint16_t PID_calc(uint16_t current_lux, uint16_t set_lux_value) {
     int e = set_lux_value - current_lux;
     float u_k = kp * (float)e;
     u_i = u_i + (int)(ki * (float)e);
-    float u_d = kd * ((float)(current_lux - prev_value) / 2.0);
-    u_pid = (int)(u_k + u_i + u_d);
-    prev_value = current_lux;
-    return saturacja(u_pid);
+    float u_d = kd * ((float)(e - prev_value) / 2.0);
+    int u_pid = (int)(u_k + u_i + u_d);
+    prev_value = e;
+    return saturate(u_pid);
 }
 
 /* USER CODE END 0 */
@@ -268,6 +379,7 @@ Error_Handler();
   MX_USART3_UART_Init();
   MX_I2C2_Init();
   /* USER CODE BEGIN 2 */
+  //LCD initialization
 	disp.addr = (0x27 << 1);
 	disp.bl = true;
 	lcd_init(&disp);
@@ -276,9 +388,11 @@ Error_Handler();
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
+	//Starting the required services
 	TIM2->CCR1 = 100;
 	HAL_TIM_PWM_Start_IT(&htim2, TIM_CHANNEL_1);
 	HAL_UART_Receive_IT(&huart3, &rx_data, 3);
+	//Sending single informative command
 	char buffer[100];
 	ParseJson("{\"LED\": 100, \"PWM\": 100, \"PRIORITY\": 1}\r\n");
   while (1)
@@ -291,7 +405,8 @@ Error_Handler();
 	sprintf((char *)disp.s_line, "Set value: %d", set_value);
 	lcd_display(&disp);
 
-	// 0 - Prioritize to change the pwm width to meet the "set_value" value
+	// Change PWM width with respect to the priority
+	// 0 - Prioritize to change the pwm width to meet the "set_value" value - Yes, PID
 	// 1 - Set the PWM width value, to read the lux value, set by defualt
 	if (priority == 1) {
 		__HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_1, pwm_width);
@@ -300,16 +415,20 @@ Error_Handler();
 		__HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_1, counter);
 	}
 
+	//Sending current data to desktop app for visualization
 	char buffer[100];
 	snprintf(buffer, sizeof(buffer), "{\"operation\": \"data\", \"data\": %.2f}\r\n", lux);
 	SendDebugMessage(buffer);
 
 	HAL_Delay(500);
 
-	//User Button click handler
+	// User Button click handler
+	// This function is called once after clicking the button, and performs
+	// the configuration while stopping all other things and then resuming after it's done
 	if (userButtonPressed) {
 		userButtonPressed = false;
 		uint32_t backup_value = __HAL_TIM_GET_COMPARE(&htim2, TIM_CHANNEL_1);
+		//Measuring lowest and highest possible lux value at output
 		__HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_1, 0);
 		HAL_Delay(500);
 		uint16_t low_lux = measureLux();
@@ -319,6 +438,7 @@ Error_Handler();
 
 		//YES I COULD HAVE CHANGED THE VALUES OF HIGH AND LOW LUX HERE
 
+		// Writing the acquired data to EEPROM
 		uint16_t measures[2] = {low_lux, high_lux};
 		if (EEPROM_WriteIntArray(0x0000, measures, sizeof(measures)) == HAL_OK) {
 			SendDebugMessage("{\"operation\": \"write\", \"message\": \"success\"}\r\n");
@@ -326,6 +446,8 @@ Error_Handler();
 			SendDebugMessage("{\"message\": \"failure\"}\r\n");
 		}
 		HAL_Delay(10);
+
+		//Reading the data from EEPROM
 		uint16_t readMeasurements[2] = {0,0};
 		if (EEPROM_ReadIntArray(0x0000, &readMeasurements, sizeof(readMeasurements)) == HAL_OK) {
 			char buffer[100];
@@ -337,7 +459,7 @@ Error_Handler();
 		} else {
 			SendDebugMessage("{\"operation\": \"read\", \"message\": \"failure\"}\r\n");
 		}
-
+		//Restoring the previous value
 		__HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_1, backup_value);
 		HAL_Delay(300);
 

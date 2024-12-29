@@ -10,7 +10,13 @@
 #include "i2c.h"
 
 
-
+/**
+ * @brief Initializes the LCD display.
+ *
+ * Sends initialization commands to the LCD via I2C and prepares it for operation.
+ *
+ * @param lcd Pointer to the lcd_disp structure representing the LCD configuration.
+ */
 void lcd_init(struct lcd_disp * lcd)
 {
 	uint8_t xpin = 0;
@@ -39,6 +45,15 @@ void lcd_init(struct lcd_disp * lcd)
 
 }
 
+/**
+ * @brief Writes data to the LCD via I2C.
+ *
+ * Sends a single byte of data or a command to the LCD using the specified pins.
+ *
+ * @param addr I2C address of the LCD.
+ * @param data The data or command byte to be written.
+ * @param xpin Pin configuration (RS, RW, EN).
+ */
 void lcd_write(uint8_t addr, uint8_t data, uint8_t xpin)
 {
 	uint8_t tx_data[4];
@@ -55,6 +70,13 @@ void lcd_write(uint8_t addr, uint8_t data, uint8_t xpin)
 	HAL_Delay(5);
 }
 
+/**
+ * @brief Updates the LCD display with the current content of the lcd_disp structure.
+ *
+ * Sends the contents of `f_line` and `s_line` to the LCD display.
+ *
+ * @param lcd Pointer to the lcd_disp structure containing the display data.
+ */
 void lcd_display(struct lcd_disp * lcd)
 {
 	uint8_t xpin = 0, i = 0;
@@ -85,6 +107,13 @@ void lcd_display(struct lcd_disp * lcd)
 	}
 }
 
+/**
+ * @brief Clears the LCD display.
+ *
+ * Sends a clear command to the LCD and resets the content of the lcd_disp structure.
+ *
+ * @param lcd Pointer to the lcd_disp structure representing the LCD configuration.
+ */
 void lcd_clear(struct lcd_disp * lcd)
 {
 	uint8_t xpin = 0;
